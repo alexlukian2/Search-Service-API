@@ -2,6 +2,25 @@ import { Injectable, Logger, Inject } from '@nestjs/common';
 import { SEARCH_CACHE_PORT } from '../ports/search-cache.port';
 import type { ISearchCachePort } from '../ports/search-cache.port';
 import { SearchResultEntity } from '../../domain/entities/search-result.entity';
+import {
+  SEARCH_TOP_QUERIES_LIMIT,
+  SEARCH_PRECACHE_DEFAULT_LIMIT,
+} from '../../infrastructure/constants/search.constants';
+
+interface SearchStats {
+  topQueries: { query: string; count: number }[];
+}
+
+interface PrecacheResult {
+  message: string;
+  totalProcessed?: number;
+  newlyCached?: number;
+  queries?: string[];
+}
+
+interface InvalidateCacheResult {
+  message: string;
+}
 
 @Injectable()
 export class SearchService {
@@ -23,6 +42,7 @@ export class SearchService {
 
     this.logger.debug(`Cache miss for query: "${query}". Simulating search...`);
 
+    // TODO: Replace with ISearchProviderPort when integrating a real search backend
     await new Promise((resolve) =>
       setTimeout(resolve, 2000 + Math.random() * 1000),
     );
@@ -42,16 +62,20 @@ export class SearchService {
     return result;
   }
 
-  async getStats() {
-    const topQueries = await this.searchCachePort.getTopQueries(10);
+  async getStats(): Promise<SearchStats> {
+    const topQueries = await this.searchCachePort.getTopQueries(
+      SEARCH_TOP_QUERIES_LIMIT,
+    );
     return { topQueries };
   }
 
-  async precache(queries?: string[]) {
+  async precache(queries?: string[]): Promise<PrecacheResult> {
     let queriesToCache = queries;
 
     if (!queriesToCache || queriesToCache.length === 0) {
-      queriesToCache = await this.searchCachePort.getTopQueriesRaw(5);
+      queriesToCache = await this.searchCachePort.getTopQueriesRaw(
+        SEARCH_PRECACHE_DEFAULT_LIMIT,
+      );
     }
 
     if (queriesToCache.length === 0) {
@@ -60,30 +84,36 @@ export class SearchService {
 
     await this.searchCachePort.savePopularQueries(queriesToCache);
 
-    let cachedCount = 0;
-    for (const query of queriesToCache) {
-      const exists = await this.searchCachePort.checkCacheExists(query);
-      if (!exists) {
-        await this.search(query);
-        cachedCount++;
-      }
-    }
+    const cacheChecks = await Promise.all(
+      queriesToCache.map(async (query) => ({
+        query,
+        exists: await this.searchCachePort.checkCacheExists(query),
+      })),
+    );
+
+    const uncachedQueries = cacheChecks
+      .filter((check) => !check.exists)
+      .map((check) => check.query);
+
+    await Promise.allSettled(
+      uncachedQueries.map((query) => this.search(query)),
+    );
 
     return {
       message: 'Pre-caching completed successfully.',
       totalProcessed: queriesToCache.length,
-      newlyCached: cachedCount,
+      newlyCached: uncachedQueries.length,
       queries: queriesToCache,
     };
   }
 
-  async invalidateCache(query: string) {
+  async invalidateCache(query: string): Promise<InvalidateCacheResult> {
     const success = await this.searchCachePort.invalidateCache(query);
 
     if (success) {
       return { message: `Cache invalidated for query: "${query}"` };
-    } else {
-      return { message: `No cache found for query: "${query}"` };
     }
+
+    return { message: `No cache found for query: "${query}"` };
   }
 }

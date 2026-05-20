@@ -2,6 +2,19 @@ import { Global, Module, Logger } from '@nestjs/common';
 import { ConfigService, ConfigModule } from '@nestjs/config';
 import { Redis } from 'ioredis';
 import { REDIS_CLIENT } from './redis.constants';
+import { RedisDisconnectService } from './redis-disconnect.service';
+
+function sanitizeRedisUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.password) {
+      parsed.password = '***';
+    }
+    return parsed.toString();
+  } catch {
+    return '<invalid-url>';
+  }
+}
 
 @Global()
 @Module({
@@ -9,28 +22,42 @@ import { REDIS_CLIENT } from './redis.constants';
   providers: [
     {
       provide: REDIS_CLIENT,
-      useFactory: (configService: ConfigService) => {
+      useFactory: (configService: ConfigService): Redis => {
         const logger = new Logger('RedisModule');
         const url = configService.get<string>('redis.url');
         const host = configService.get<string>('redis.host');
         const port = configService.get<number>('redis.port');
+        const password = configService.get<string>('redis.password');
 
-        const client = url ? new Redis(url) : new Redis({ host, port });
+        let client: Redis;
 
-        const connectionLabel = url ?? `${host}:${port}`;
+        if (url) {
+          client = new Redis(url);
+        } else {
+          client = new Redis({
+            host,
+            port,
+            ...(password ? { password } : {}),
+          });
+        }
+
+        const connectionLabel = url ? sanitizeRedisUrl(url) : `${host}:${port}`;
 
         client.on('connect', () => {
-          logger.log(`Connected to Redis at ${connectionLabel} successfully`);
+          logger.log(`Connected to Redis at ${connectionLabel}`);
         });
 
-        client.on('error', (err) => {
-          logger.error(`Redis connection error (${connectionLabel})`, err);
+        client.on('error', (err: Error) => {
+          logger.error(
+            `Redis connection error (${connectionLabel}): ${err.message}`,
+          );
         });
 
         return client;
       },
       inject: [ConfigService],
     },
+    RedisDisconnectService,
   ],
   exports: [REDIS_CLIENT],
 })

@@ -1,7 +1,10 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Redis } from 'ioredis';
 import { ISearchCachePort } from '../../application/ports/search-cache.port';
-import { SearchResultEntity } from '../../domain/entities/search-result.entity';
+import {
+  SearchResultEntity,
+  SearchResultProps,
+} from '../../domain/entities/search-result.entity';
 import { REDIS_CLIENT } from '../../../../infrastructure/redis/redis.constants';
 import {
   SEARCH_CACHE_PREFIX,
@@ -11,17 +14,30 @@ import {
 } from '../constants/search.constants';
 
 @Injectable()
-export class RedisSearchRepositoryAdapter implements ISearchCachePort {
+export class RedisSearchCacheAdapter implements ISearchCachePort {
+  private readonly logger = new Logger(RedisSearchCacheAdapter.name);
+
   constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
 
   async getCachedSearch(query: string): Promise<SearchResultEntity | null> {
     const cacheKey = `${SEARCH_CACHE_PREFIX}${query}`;
     const result = await this.redis.get(cacheKey);
-    return result
-      ? new SearchResultEntity(
-          JSON.parse(result) as Partial<SearchResultEntity>,
-        )
-      : null;
+
+    if (!result) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(result) as SearchResultProps;
+      return new SearchResultEntity(parsed);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to parse cached data for key "${cacheKey}", removing corrupted entry`,
+        error instanceof Error ? error.message : String(error),
+      );
+      await this.redis.del(cacheKey);
+      return null;
+    }
   }
 
   async cacheSearchResult(
@@ -44,19 +60,21 @@ export class RedisSearchRepositoryAdapter implements ISearchCachePort {
   async getTopQueries(
     limit: number,
   ): Promise<{ query: string; count: number }[]> {
-    const topQueriesRaw = await this.redis.zrevrange(
+    const rawEntries = await this.redis.zrevrange(
       SEARCH_STATS_KEY,
       0,
       limit - 1,
       'WITHSCORES',
     );
-    const topQueries = [];
-    for (let i = 0; i < topQueriesRaw.length; i += 2) {
+
+    const topQueries: { query: string; count: number }[] = [];
+    for (let i = 0; i < rawEntries.length; i += 2) {
       topQueries.push({
-        query: topQueriesRaw[i],
-        count: parseInt(topQueriesRaw[i + 1], 10),
+        query: rawEntries[i],
+        count: parseInt(rawEntries[i + 1], 10),
       });
     }
+
     return topQueries;
   }
 
@@ -65,13 +83,13 @@ export class RedisSearchRepositoryAdapter implements ISearchCachePort {
   }
 
   async savePopularQueries(queries: string[]): Promise<void> {
-    const popularSetArgs: (string | number)[] = [];
-    queries.forEach((q, index) => {
-      popularSetArgs.push(queries.length - index, q);
+    const scoredEntries: (string | number)[] = [];
+    queries.forEach((query, index) => {
+      scoredEntries.push(queries.length - index, query);
     });
 
-    if (popularSetArgs.length > 0) {
-      await this.redis.zadd(SEARCH_POPULAR_KEY, ...popularSetArgs);
+    if (scoredEntries.length > 0) {
+      await this.redis.zadd(SEARCH_POPULAR_KEY, ...scoredEntries);
     }
   }
 

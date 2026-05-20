@@ -1,48 +1,80 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
-import { HttpExceptionFilter } from './common/filters/http-exception.filter';
-import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 
-async function bootstrap() {
+async function bootstrap(): Promise<void> {
+  const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
+  const environment = configService.get<string>('environment') ?? 'development';
 
-  // Security
-  app.use(helmet({ contentSecurityPolicy: false }));
-  app.enableCors();
+  // Security headers
+  app.use(
+    helmet({
+      contentSecurityPolicy:
+        environment === 'production'
+          ? undefined // use helmet defaults in production
+          : false, // disable only in development for Swagger UI
+    }),
+  );
 
-  // Global Middlewares
+  // CORS — restricted origins from configuration
+  const allowedOrigins = configService.get<string[]>('cors.allowedOrigins') ?? [
+    'http://localhost:3000',
+  ];
+  app.enableCors({
+    origin: allowedOrigins,
+    methods: ['GET', 'POST', 'DELETE', 'PATCH', 'PUT'],
+    credentials: true,
+    maxAge: 86400,
+  });
+
+  // API versioning
+  app.setGlobalPrefix('api/v1', {
+    exclude: ['health'],
+  });
+  app.enableVersioning({
+    type: VersioningType.URI,
+  });
+
+  // Global validation pipe
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
       transform: true,
+      forbidNonWhitelisted: true,
+      forbidUnknownValues: true,
     }),
   );
-  app.useGlobalFilters(new HttpExceptionFilter());
-  app.useGlobalInterceptors(new TransformInterceptor());
 
-  // Set up Swagger
-  const config = new DocumentBuilder()
-    .setTitle('Search Service API')
-    .setDescription(
-      'The Search API description with Redis caching (Clean Architecture)',
-    )
-    .setVersion('1.0')
-    .addTag('search')
-    .build();
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('api', app, document);
+  // Swagger — only in non-production environments
+  if (environment !== 'production') {
+    const config = new DocumentBuilder()
+      .setTitle('Search Service API')
+      .setDescription('Search API with Redis caching — Clean Architecture')
+      .setVersion('1.0')
+      .addTag('search')
+      .addTag('health')
+      .build();
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('api/docs', app, document);
+
+    logger.log(`Swagger docs available at /api/docs`);
+  }
+
+  // Graceful shutdown hooks
+  app.enableShutdownHooks();
 
   const port = configService.get<number>('port') ?? 3000;
   await app.listen(port);
-  console.log(`Application is running on port ${port}`);
-
+  logger.log(`Application running on port ${port} [${environment}]`);
 }
+
 bootstrap().catch((err) => {
-  console.error(err);
+  const logger = new Logger('Bootstrap');
+  logger.error('Failed to start application', err);
   process.exit(1);
 });
