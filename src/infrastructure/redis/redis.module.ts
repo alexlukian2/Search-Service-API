@@ -17,12 +17,14 @@ import { REDIS_CLIENT } from './redis.constants';
 
         const client = url ? new Redis(url) : new Redis({ host, port });
 
+        const connectionLabel = url ?? `${host}:${port}`;
+
         client.on('connect', () => {
-          logger.log(`Connected to Redis at ${host}:${port} successfully`);
+          logger.log(`Connected to Redis at ${connectionLabel} successfully`);
         });
 
         client.on('error', (err) => {
-          logger.error('Redis connection error', err);
+          logger.error(`Redis connection error (${connectionLabel})`, err);
         });
 
         return client;
